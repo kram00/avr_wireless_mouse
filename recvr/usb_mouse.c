@@ -25,7 +25,7 @@
 // Version 1.1: Add support for Teensy 2.0
 
 // modified by Furiosus to support 16 bit motion data
-// modified by qsxcv for use with the "g102"
+// modified by qsxcv
 
 #define USB_SERIAL_PRIVATE_INCLUDE
 #include "usb_mouse.h"
@@ -37,8 +37,8 @@
  **************************************************************************/
 
 // You can change these to give your code its own name.
-#define STR_MANUFACTURER	L"LOLOLOL"
-#define STR_PRODUCT		L"torq x5wireles"
+#define STR_MANUFACTURER	L"Mark"
+#define STR_PRODUCT		L"Public"
 
 
 // Mac OS-X and Linux automatically load the correct drivers.  On
@@ -146,14 +146,14 @@ static const uint8_t PROGMEM mouse_hid_report_desc[] = {
 	0xA1, 0x01,		// Collection (Application)
 	0x05, 0x09,		//   Usage Page (Button)
 	0x19, 0x01,		//   Usage Minimum (Button #1)
-	0x29, 0x03,		//   Usage Maximum (Button #3)
+	0x29, 0x05,		//   Usage Maximum (Button #5)
 	0x15, 0x00,		//   Logical Minimum (0)
 	0x25, 0x01,		//   Logical Maximum (1)
-	0x95, 0x03,		//   Report Count (3)
+	0x95, 0x05,		//   Report Count (5)
 	0x75, 0x01,		//   Report Size (1)
 	0x81, 0x02,		//   Input (Data, Variable, Absolute)
 	0x95, 0x01,		//   Report Count (1)
-	0x75, 0x05,		//   Report Size (5)
+	0x75, 0x03,		//   Report Size (3)
 	0x81, 0x03,		//   Input (Constant) // Byte 1
 	0x05, 0x01,		//   Usage Page (Generic Desktop)
 	0x09, 0x30,		//   Usage (X)
@@ -214,7 +214,7 @@ static const uint8_t PROGMEM config1_descriptor[CONFIG1_DESC_SIZE] = {
 	MOUSE_ENDPOINT | 0x80,			// bEndpointAddress
 	0x03,					// bmAttributes (0x03=intr)
 	6, 0,					// wMaxPacketSize
-	1					// bInterval
+	1					// bInterval **** USB POLLING RATE ****
 };
 
 // If you're desperate for a little extra code memory, these strings

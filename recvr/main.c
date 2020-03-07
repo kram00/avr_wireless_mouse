@@ -300,7 +300,7 @@ PORTD &= ~(1<<6);
 			py.all = ny.all;
 			pwhl = nwhl;
 		}
-		btn_usb |= _btn & 0x07; // mask all but l, r, m
+		btn_usb |= _btn & 0x0f; // mask all but l, r, m, dpi
 		// only transmit if there's something worth transmitting
 		if ((btn_usb != btn_usb_prev)|| dx.all || dy.all || dwhl) {
 			UEDATX = btn_usb;
