@@ -61,7 +61,7 @@
 #include <avr/pgmspace.h>
 #include <avr/power.h>
 #include <avr/sleep.h>
-#include "srom_3366_0x09.h"
+#include "srom_3360_0x05.h"
 
 #define delay_us(t) __builtin_avr_delay_cycles((t) * F_CPU/1000000)
 #define delay_ms(t) __builtin_avr_delay_cycles((t) * F_CPU/1000)
@@ -147,8 +147,12 @@ union motion_data {
 
 	#define IRQ_IS_LOW	(!(PINC & (1<<7)))
 
-	#define WHL_A_IS_HIGH	(!!(PINB & (1<<4)))
-	#define WHL_B_IS_HIGH	(!!(PINB & (1<<5)))
+	//#define WHL_A_IS_HIGH	(!!(PINB & (1<<4)))
+	//#define WHL_B_IS_HIGH	(!!(PINB & (1<<5)))
+	#define WHL_MAX_TIMEOUT 16000 // = 2 seconds
+
+	#define WHL_LED_ON (PORTB &= ~(1<<4))
+	#define WHL_LED_OFF (PORTB |= (1<<4))
 	static void pins_init(void)
 	{
 		// debug LED
@@ -162,12 +166,18 @@ union motion_data {
 		PORTF = 0xff;
 
 		// buttons (this and some stuff below is redundant due to above)
-		DDRD &= ~(0x07);
-		PORTD |= 0x07; // D0, D1, D2 pullup inputs for L, R, M
+		//DDRD &= ~(0x07);
+		//PORTD |= 0x07; // D0, D1, D2 pullup inputs for L, R, M
+		DDRD &= ~(0x0f);
+		PORTD |= 0x0f; // D0, D1, D2 pullup inputs for L, R, M, DPI
+		//PORTD |= 0b00001111; // L, R, M, DPI
 
 		// wheel (mechanical encoder, quadrature outputs A/B)
-		DDRB &= ~((1<<4) | (1<<5));
-		PORTB |= (1<<4) | (1<<5);
+		//DDRB &= ~((1<<4) | (1<<5));
+		//PORTB |= (1<<4) | (1<<5);
+		PORTB |= (1<<4);
+		DDRB |= (1<<4); // B4 led (active low)
+		DDRB &= ~(1<<5); // B6 detector input
 
 		// spi
 		PORTB &= ~(1<<0); // keep default SS low output to enable SPI
@@ -186,9 +196,9 @@ union motion_data {
 		DDRC &= ~(1<<7); // IRQ input
 
 
-		EICRA = 0b00010101; // generate interrupt request on any edge of D0/D1/D2
+		EICRA = 0b01010101; // generate interrupt request on any edge of D0/D1/D2
 		EIMSK = 0; // but don't enable any actual interrupts
-		EIFR = 0b00000111; // clear EIFR
+		EIFR = 0b00001111; // clear EIFR
 		PCMSK0 = 0b10110000; // PCINT0 for wheel and sensor for sleep mode.
 		PCICR = 0; // don't enable PCINT0 yet
 	}
@@ -328,6 +338,7 @@ static void pmw3366_init(const uint8_t dpi)
 	spi_3366_write(0x0f, dpi);
 	spi_3366_write(0x42, 0x00); // angle snapping
 	//spi_3366_write(0x63, 0x03); // 3mm lod
+	spi_3366_write(0x63, 0x02); // 2mm lod
 	SS_3366_HIGH;
 }
 
@@ -378,6 +389,35 @@ static void nrf24_init(void)
 	// addresses (use default 0xe7e7e7e7e7)
 }
 
+// reads the change from the wheel detector.
+// see http://www.google.com/patents/US6552716
+static inline int8_t whl_read(void)
+{
+	// read "B"
+	PORTB |= (1<<5); // PORT before DDR to avoid outputting a falling edge
+	DDRB |= (1<<5);
+	delay_us(1); // not sure how long to delay. 1us seems sufficient
+	PORTB &= ~(1<<5); // output a falling edge
+	delay_us(1);
+	DDRB &= ~(1<<5);
+	delay_us(1);
+	int8_t b = ((PINB & (1<<5)) != 0); // read the pin
+
+	delay_us(1);
+
+	// read "A"
+	PORTB |= (1<<5);
+	DDRB |= (1<<5);
+	delay_us(1);
+	PORTB &= ~(1<<5);
+	delay_us(1);
+	DDRB &= ~(1<<5);
+	delay_us(1);
+	int8_t a = ((PINB & (1<<5)) != 0);
+
+	return (a - b);
+	// toggle wheel led for ~25us after calling this function
+}
 
 EMPTY_INTERRUPT(TIMER1_COMPA_vect);
 EMPTY_INTERRUPT(TIMER1_COMPB_vect);
@@ -404,9 +444,9 @@ int main(void)
 
 	delay_ms(345); // arbitrary
 
-	uint8_t dpi = 0x0f; // default to 800
+	uint8_t dpi = 0x07; // default to 800
 	if (!(PIND & (1<<0))) // if left is pressed at boot
-		dpi = 0xff; // set to 12800
+		dpi = 0x0f; // set to 1600
 
 	pmw3366_init(dpi);
 	nrf24_init();
@@ -416,16 +456,28 @@ int main(void)
 	uint8_t btn_prev = ~(PIND);
 	// time (in 125us) button has been unpressed.
 	// consider button to be released if this time exceeds DEBOUNCE_TIME.
-	uint8_t btn_time[3] = {0, 0, 0};
+	uint8_t btn_time[4] = {0, 0, 0, 0};
 
 	// absolute positions. relies on integer overflow
 	union motion_data x = {0}, y = {0};
 
 	// wheel stuff
-	uint8_t whl_prev_same = 0; // what A was the last time A == B
-	uint8_t whl_prev_diff = 0; // what A was the last time A != B
+	//uint8_t whl_prev_same = 0; // what A was the last time A == B
+	//uint8_t whl_prev_diff = 0; // what A was the last time A != B
 	// absolute scroll position. relies on integer overflow
-	int8_t whl = 0;
+	//int8_t whl = 0;
+	// wheel
+	WHL_LED_ON; // initial pulse for first read
+	delay_us(25);
+	WHL_LED_OFF;
+	// ticks are what the detector outputs.
+	// for g100s's wheel/detector, 8 ticks = 1 scroll notch.
+	// these two variables serve as accumulators, since the wheel is read
+	// more frequently than usb data is transmitted
+	int8_t whl_notches = 0;
+	int8_t whl_ticks = 0;
+	// if no wheel motion after this many cycles, reset whl_ticks.
+	uint16_t whl_timeout = 0;
 
 	// begin burst mode for 3366
 	spi_set3366mode();
@@ -468,10 +520,32 @@ int main(void)
 		spi_send(0x50);
 		// do stuff here instead of busy waiting for 35us
 
+		const int8_t _whl_ticks = whl_read(); // takes ~10us
+		WHL_LED_ON;
+		delay_us(25); // toggle wheel for next cycle's read
+		WHL_LED_OFF;
+
+		// check wheel timeout
+		if (whl_timeout != 0) whl_timeout++;
+		if (whl_timeout >= WHL_MAX_TIMEOUT) {
+			whl_timeout = 0;
+			whl_ticks = 0; // assume wheel is in center of a notch
+		}
+
+		// wheel calculations
+		whl_ticks += _whl_ticks;
+		int8_t _whl_notches = 0;
+		if (_whl_ticks != 0) {
+			_whl_notches = whl_ticks / 5;
+			// same as (whl_ticks > 4) - (whl_ticks < -4)
+			whl_ticks -= _whl_notches * 8;
+			whl_timeout = 1; //reset timeout
+		}
+
 		// read wheel
-		int8_t dwhl = 0;
-		const uint8_t whl_a = WHL_A_IS_HIGH;
-		const uint8_t whl_b = WHL_B_IS_HIGH;
+		//int8_t dwhl = 0;
+		//const uint8_t whl_a = WHL_A_IS_HIGH;
+		//const uint8_t whl_b = WHL_B_IS_HIGH;
 	//	if (whl_a == whl_b) {
 	//		if (whl_a != whl_prev_same) {
 	//			dwhl = 2 * (whl_a ^ whl_prev_diff) - 1;
@@ -480,13 +554,13 @@ int main(void)
 	//		}
 	//	} else
 	//		whl_prev_diff = whl_a;
-		if (whl_a != whl_b)
-			whl_prev_diff = whl_a;
-		else if (whl_a != whl_prev_same) {
-			dwhl = 2 * (whl_a ^ whl_prev_diff) - 1;
-			whl += dwhl;
-			whl_prev_same = whl_a;
-		}
+		//if (whl_a != whl_b)
+		//	whl_prev_diff = whl_a;
+		//else if (whl_a != whl_prev_same) {
+		//	dwhl = 2 * (whl_a ^ whl_prev_diff) - 1;
+		//	whl += dwhl;
+		//	whl_prev_same = whl_a;
+		//}
 
 		// read buttons
 		/*
@@ -496,7 +570,7 @@ int main(void)
 		PIND 1 EIFR 1: high, edge -> low at some point in the last 1ms
 		*/
 		const uint8_t btn_unpressed = PIND & ~(EIFR);
-		EIFR = 0b00000111; // clear EIFR
+		EIFR = 0b00001111; // clear EIFR
 		// manual loop debouncing for every button
 		uint8_t btn_dbncd = 0x00;
 		#define DEBOUNCE(index) \
@@ -509,16 +583,18 @@ int main(void)
 			btn_dbncd |= (~btn_unpressed) & (1<<index); \
 		}
 
-		DEBOUNCE(0);
-		DEBOUNCE(1);
-		DEBOUNCE(2);
+		DEBOUNCE(0); // L
+		DEBOUNCE(1); // R
+		DEBOUNCE(2); // M
+		DEBOUNCE(3); // DPI
+
 		#undef DEBOUNCE
 
 		// wait until 35us have elapsed since spi_send(0x50)
 	//	if (TIFR1 & (1<<OCF1B)) PORTD |= (1<<6);
-		TIMSK1 |= (1<<OCIE1B);
-		sei(); sleep_mode(); cli();
-		TIMSK1 &= ~(1<<OCIE1B);
+		//TIMSK1 |= (1<<OCIE1B);
+		//sei(); sleep_mode(); cli();
+		//TIMSK1 &= ~(1<<OCIE1B);
 
 		union motion_data dx, dy;
 		spi_send(0x00); // motion, not used
@@ -531,9 +607,10 @@ int main(void)
 
 		x.all += dx.all;
 		y.all += dy.all;
+		whl_notches += _whl_notches;
 
 		if (sync == 0) afk++;
-		const uint8_t changed = (btn_dbncd != btn_prev) || dx.all || dy.all || dwhl;
+		const uint8_t changed = (btn_dbncd != btn_prev) || dx.all || dy.all || _whl_notches;
 		if (changed) afk = 0;
 
 		if (changed || (sync <= 1)) {
@@ -569,7 +646,7 @@ int main(void)
 			spi_send(x.hi);
 			spi_send(y.lo);
 			spi_send(y.hi);
-			spi_send(whl);
+			spi_send(whl_notches);
 			SS_NRF24_HIGH;
 
 			// pulse CE to transmit
@@ -598,7 +675,7 @@ int main(void)
 		// power down if afk
 		if (afk > AFK_TIMEOUT) {
 			// enable external interrupts on INT0/1/2/3, PCINT0
-			EIMSK = 0b00000111;
+			EIMSK = 0b00001111;
 			PCICR = 0x01;
 			// go power down mode; wake up on interrupt
 			set_sleep_mode(SLEEP_MODE_PWR_DOWN);
